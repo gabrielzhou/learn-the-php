@@ -1,0 +1,145 @@
+<?php
+
+$time_start = microtime(true);
+
+//Get POST parameters
+$jid=$_POST['job'];
+
+ini_set("memory_limit","50M");
+
+include("funclib.php");
+
+//Check we have enough files
+if (count($_FILES)<2){echo "NOT ENOUGH FILES"; exit;}
+
+//Establish Database connection
+if (!SQLConnect()){echo "SQL Error : ".SQLError();exit;}
+
+//Execute the command to combine the data
+$command = './wicombine "'.$_FILES["wfile"]["tmp_name"].'" "'.$_FILES["ifile"]["tmp_name"].'" "/tmp/wicombined"';
+exec($command, $output, $result);
+if ($result!=0){echo "Failed to Integrate Information : ".implode($output)."<br />\n"; exit;}
+unset($output);
+
+//Get the combined data
+exec("cat /tmp/wicombined",$output,$result);
+if ($result!=0){echo "Failed to Retrieve Integrated Information : ".implode($output)."<br />\n"; exit;}
+
+//Clear any old data
+SQLQuery("DELETE FROM WiringJobs WHERE JID='".$_POST['job']."';");
+SQLQuery("DELETE FROM WiringData WHERE JID='".$_POST['job']."';");
+SQLQuery("DELETE FROM WiringDataExtra WHERE JID='".$_POST['job']."';");
+
+//Prepare the arrays
+$wires=array();
+$wireextras=array();
+
+//Parse the returnd data
+foreach ($output as $line_num => $line){
+	unset($matches);
+	switch ($line[0]){
+		case 'H':	//Header
+			if (preg_match("/.(?<Key>.*):(?<Value>.*)/",$line,$matches)){
+				$header[$matches['Key']]=$matches['Value'];
+			}else{
+				echo "Malformed Integrated Information : ".$line."<br />\n"; exit;
+			}
+			break;
+
+		case 'W':	//Wire
+			if (preg_match("/.(?<FromName>[^,]*),(?<ToName>[^,]*),(?<FromX>[^,]*),(?<FromY>[^,]*),(?<ToX>[^,]*),(?<ToY>[^,]*),(?<Length>[^,]*),(?<Gague>[^,]*),(?<Colour>[^,]*),(?<FromType>[^,]*),(?<ToType>[^,]*),(?<Device>[^,]*),(?<Top>[^,]*)/",$line,$matches)){
+				$matches['FromName']=urldecode($matches['FromName']);
+				$matches['ToName']=urldecode($matches['ToName']);
+				$matches['Colour']=urldecode($matches['Colour']);
+				$matches['FromType']=urldecode($matches['FromType']);
+				$matches['ToType']=urldecode($matches['ToType']);
+				$matches['Device']=urldecode($matches['Device']);
+				$wires[]=$matches;
+			}else{
+				echo "Malformed Integrated Information : ".$line."<br />\n"; exit;
+			}
+			break;
+
+		case 'X':	//Extra
+			if (preg_match("/.(?<X>[\d\.]*),(?<Y>[\d\.]*),(?<Type>[^,]*),(?<Name>[^,]*),(?<Top>[^,]*)/",$line,$matches)){
+				$matches['Type']=urldecode($matches['Type']);
+				$matches['Name']=urldecode($matches['Name']);
+				$extras[]=$matches;
+			}else{
+				echo "Malformed Integrated Information : ".$line."<br />\n"; exit;
+			}
+			break;
+	}
+}
+echo "<PRE>";
+print_r($header);
+echo "</PRE>";
+echo "<hr />";
+echo "<PRE>";
+//print_r($wires);
+echo "</PRE>";
+echo "<hr />";
+echo "<PRE>";
+//print_r($extras);
+echo "</PRE>";
+
+//Insert header info into jobs database
+$query = "INSERT INTO WiringJobs (`jid`,`size`,`wirecount`,`extracount`,`lowX`,`lowY`,`hiX`,`hiY`) VALUES ('".$jid."','".$header['Size']."','".$header['Wires']."','".$header['Extras']."','".$header['LowX']."','".$header['LowY']."','".$header['HiX']."','".$header['HiY']."');";
+if (!SQLQuery($query)){echo "SQL Error : ".SQLError();}
+
+//Insert wire info into jobs database
+$wireno=0;
+foreach ($wires as $matches){
+	$query = "INSERT INTO WiringData (`jid`,`From`,`To`,`FromX`,`FromY`,`ToX`,`ToY`,`Length`,`Gague`,`Colour`,`FromType`,`ToType`,`Name`,`WireNo`,`Top`) VALUES ('".$jid."','".$matches['FromName']."','".$matches['ToName']."','".$matches['FromX']."','".$matches['FromY']."','".$matches['ToX']."','".$matches['ToY']."','".$matches['Length']."','".$matches['Gague']."','".$matches['Colour']."','".$matches['FromType']."','".$matches['ToType']."','".$matches['Device']."','".$wireno++."','".$matches['Top']."');";
+	if (!SQLQuery($query)){echo "SQL Error : ".SQLError();}
+}
+
+//Insert extra data into jobs database
+$wireno=0;
+foreach ($extras as $matches){
+	$query = "INSERT INTO WiringDataExtras (`jid`,`X`,`Y`,`type`,`name`,`data`,`Top`) VALUES ('".$jid."','".$matches['X']."','".$matches['Y']."','".$matches['Type']."','".$matches['Name']."','','".$matches['Top']."');";
+	if (!SQLQuery($query)){echo "SQL Error : ".SQLError();}
+}
+
+/*
+//Store wire results in database
+foreach ($wires as $matches){
+	//Calculate the physical co-ordinates based on the HP BRC values
+	$matches['FromX'] = (((($matches['FromColumn']+(($matches['FromBank']==2)?95:0))*-1500)+279111)*-0.002545333333)+741.6966045;
+	$matches['FromY'] = ((($matches['FromRow']*7000)-88725)*0.002544285714)+241.17975;
+	$matches['ToX'] = (((($matches['ToColumn']+(($matches['ToBank']==2)?95:0))*-1500)+279111)*-0.002545333333)+741.6966045;
+	$matches['ToY'] = ((($matches['ToRow']*7000)-88725)*0.002544285714)+241.17975;
+	
+	$matches['From']=$matches['FromBank']." ".$matches['FromRow']." ".$matches['FromColumn'];
+	$matches['To']=$matches['ToBank']." ".$matches['ToRow']." ".$matches['ToColumn'];
+
+	$query = "INSERT INTO TMP_Wiring (`jid`,`From`,`To`,`FromX`,`FromY`,`ToX`,`ToY`,`Length`,`Gague`,`Colour`,`FromType`,`ToType`,`Name`,`WireNo`) VALUES ('".$jid."','".$matches['From']."','".$matches['To']."','".$matches['FromX']."','".$matches['FromY']."','".$matches['ToX']."','".$matches['ToY']."','".$matches['Length']."','".$matches['Gague']."','".$matches['Colour']."','".$matches['FromType']."','".$matches['ToType']."','".$matches['Device']."','".$wireno++."');";
+
+	if (!SQLQuery($query)){echo "SQL Error : ".SQLError();}
+}
+
+
+/*
+//Store wire extra results in database
+foreach ($wireextras as $matches){
+	$x = (((($matches['Column']+(($matches['Bank']==2)?95:0))*-1500)+279111)*-0.002545333333)+741.6966045;
+	$y = ((($matches['Row']*7000)-88725)*0.002544285714)+241.17975;
+
+	$name=$matches['Bank']." ".$matches['Row']." ".$matches['Column'];
+	$query = "INSERT INTO WiringDataExtras (`jid`,`X`,`Y`,`type`,`name`) VALUES ('".$jid."','".$x."','".$y."','extra','".$name."');";
+
+	if (!SQLQuery($query)){echo "SQL Error : ".SQLError();}
+}
+
+*/
+echo "<u>Data Entereted</u><BR/>";
+echo "<pre>";
+print_r($header);
+echo "</pre>";
+
+$time_end = microtime(true);
+$time = $time_end - $time_start;
+echo "Execution time : $time seconds\n";
+
+
+?>
